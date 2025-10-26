@@ -500,6 +500,50 @@ class FocalLoss(nn.Module):
             return focal_loss
 
 
+class TverskyLoss(nn.Module):
+    """Tversky损失：支持控制FP与FN的相对权重，用于不平衡分割。"""
+
+    def __init__(self, alpha: float = 0.7, beta: float = 0.3, smooth: float = 1.0, reduction: str = 'mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(predictions)
+        tp = (probs * targets).sum(dim=(-2, -1))
+        fp = (probs * (1 - targets)).sum(dim=(-2, -1))
+        fn = ((1 - probs) * targets).sum(dim=(-2, -1))
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        loss = 1.0 - tversky
+        if self.reduction == 'mean':
+            return loss.mean()
+        if self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
+class FocalTverskyLoss(nn.Module):
+    """Focal Tversky损失：进一步聚焦困难样本。"""
+
+    def __init__(self, alpha: float = 0.7, beta: float = 0.3, gamma: float = 0.75, smooth: float = 1.0, reduction: str = 'mean'):
+        super().__init__()
+        self.base = TverskyLoss(alpha=alpha, beta=beta, smooth=smooth, reduction='none')
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        base = self.base(predictions, targets)  # 1 - TI
+        # base in [0,1], focalize towards hard examples
+        focal = base.pow(self.gamma)
+        if self.reduction == 'mean':
+            return focal.mean()
+        if self.reduction == 'sum':
+            return focal.sum()
+        return focal
+
+
 class CombinedLoss(nn.Module):
     """组合损失函数"""
     
@@ -507,29 +551,52 @@ class CombinedLoss(nn.Module):
                  bce_weight: float = 0.6,
                  dice_weight: float = 0.3,
                  focal_weight: float = 0.1,
+                 tversky_weight: float = 0.0,
+                 focal_tversky_weight: float = 0.0,
+                 tversky_alpha: float = 0.7,
+                 tversky_beta: float = 0.3,
+                 focal_tversky_gamma: float = 0.75,
+                 bce_smoothing: float = 0.0,
                  focal_alpha: float = 0.25,
                  focal_gamma: float = 2.0):
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
+        self.tversky_weight = tversky_weight
+        self.focal_tversky_weight = focal_tversky_weight
+        self.bce_smoothing = float(bce_smoothing)
         
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.dice_loss = DiceLoss()
         self.focal_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma) if focal_weight > 0 else None
+        self.tversky_loss = TverskyLoss(alpha=tversky_alpha, beta=tversky_beta) if tversky_weight > 0 else None
+        self.focal_tversky_loss = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=focal_tversky_gamma) if focal_tversky_weight > 0 else None
     
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """计算组合损失"""
+        # Label smoothing for BCE target
+        if self.bce_smoothing > 0:
+            smoothed_targets = targets * (1.0 - self.bce_smoothing) + 0.5 * self.bce_smoothing
+        else:
+            smoothed_targets = targets
+
         total_loss = 0.0
         
         if self.bce_weight > 0:
-            total_loss += self.bce_weight * self.bce_loss(predictions, targets)
+            total_loss += self.bce_weight * self.bce_loss(predictions, smoothed_targets)
         
         if self.dice_weight > 0:
             total_loss += self.dice_weight * self.dice_loss(predictions, targets)
         
         if self.focal_weight > 0 and self.focal_loss is not None:
             total_loss += self.focal_weight * self.focal_loss(predictions, targets)
+        
+        if self.tversky_weight > 0 and self.tversky_loss is not None:
+            total_loss += self.tversky_weight * self.tversky_loss(predictions, targets)
+
+        if self.focal_tversky_weight > 0 and self.focal_tversky_loss is not None:
+            total_loss += self.focal_tversky_weight * self.focal_tversky_loss(predictions, targets)
         
         return total_loss
 
@@ -763,6 +830,11 @@ class SegmentationTrainer:
         total_dice = 0.0
         num_batches = 0
         
+        # 动态阈值增强（Curriculum Thresholding）：前期阈值低、后期逐步增大
+        # 有助于模型先学习召回，再平衡精确率
+        epoch_progress = max(0.0, min(1.0, self.current_epoch / max(1, getattr(self, 'total_epochs', 1))))
+        dynamic_eval_threshold = 0.35 + 0.3 * epoch_progress  # 0.35 -> 0.65
+
         for batch_idx, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
             masks = batch['mask'].to(self.device)
@@ -804,7 +876,7 @@ class SegmentationTrainer:
                 for i in range(pred_probs.shape[0]):
                     pred_np = pred_probs[i, 0].cpu().numpy()
                     mask_np = masks[i, 0].cpu().numpy()
-                    dice = SegmentationMetrics.dice_coefficient(pred_np, mask_np)
+                    dice = SegmentationMetrics.dice_coefficient(pred_np, mask_np, threshold=dynamic_eval_threshold)
                     dice_scores.append(dice)
                 
                 avg_dice = np.mean(dice_scores)
@@ -1175,6 +1247,18 @@ def parse_arguments():
                        help='Dice损失权重')
     parser.add_argument('--focal_weight', type=float, default=0.1,
                        help='Focal损失权重')
+    parser.add_argument('--tversky_weight', type=float, default=0.0,
+                       help='Tversky损失权重')
+    parser.add_argument('--focal_tversky_weight', type=float, default=0.0,
+                       help='Focal Tversky损失权重')
+    parser.add_argument('--tversky_alpha', type=float, default=0.7,
+                       help='Tversky损失alpha权重 (FP权重)')
+    parser.add_argument('--tversky_beta', type=float, default=0.3,
+                       help='Tversky损失beta权重 (FN权重)')
+    parser.add_argument('--focal_tversky_gamma', type=float, default=0.75,
+                       help='Focal Tversky的gamma指数')
+    parser.add_argument('--bce_smoothing', type=float, default=0.0,
+                       help='BCE标签平滑比例 [0,1]')
     
     # 数据增强配置
     parser.add_argument('--enable_denoising', action='store_true',
@@ -1257,7 +1341,13 @@ def main():
     criterion = CombinedLoss(
         bce_weight=args.bce_weight,
         dice_weight=args.dice_weight,
-        focal_weight=args.focal_weight
+        focal_weight=args.focal_weight,
+        tversky_weight=args.tversky_weight,
+        focal_tversky_weight=args.focal_tversky_weight,
+        tversky_alpha=args.tversky_alpha,
+        tversky_beta=args.tversky_beta,
+        focal_tversky_gamma=args.focal_tversky_gamma,
+        bce_smoothing=args.bce_smoothing
     )
     
     # 创建优化器
