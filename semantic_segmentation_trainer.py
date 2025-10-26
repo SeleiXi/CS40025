@@ -322,9 +322,15 @@ class BuildingSegmentationDataset(Dataset):
     
     def _load_image(self, image_path: str) -> np.ndarray:
         """加载并预处理图像"""
-        image = cv2.imread(image_path)
+        # 防御式清洗路径，去除多余的空白与尾随标点（如逗号/引号）
+        cleaned_path = os.path.normpath(str(image_path).strip().strip('\",\'')).replace('\\', '/')
+        image = cv2.imread(cleaned_path)
         if image is None:
-            raise FileNotFoundError(f"无法加载图像: {image_path}")
+            # 再尝试一次：去除末尾可能残留的逗号或引号再读
+            fallback_path = os.path.normpath(cleaned_path.rstrip(',\'\"'))
+            image = cv2.imread(fallback_path)
+            if image is None:
+                raise FileNotFoundError(f"无法加载图像: {image_path}")
         
         # 去噪处理
         if self.enable_denoising:
@@ -1036,6 +1042,13 @@ def create_data_loaders(train_csv_path: str,
     """
     # 读取训练数据
     train_df = pd.read_csv(train_csv_path, sep='\t', names=['name', 'mask'])
+    # 清洗文件名：去空白与首尾标点（引号/逗号）
+    train_df['name'] = (
+        train_df['name']
+        .astype(str)
+        .str.strip()
+        .str.replace(r'^[\"\']+|[,\"\']+$', '', regex=True)
+    )
     train_df['image_path'] = train_df['name'].apply(lambda x: os.path.join(train_img_dir, x))
     
     # 划分训练和验证集
@@ -1068,6 +1081,12 @@ def create_data_loaders(train_csv_path: str,
     
     # 读取测试数据
     test_df = pd.read_csv(test_csv_path, sep='\t', names=['name', 'mask'])
+    test_df['name'] = (
+        test_df['name']
+        .astype(str)
+        .str.strip()
+        .str.replace(r'^[\"\']+|[,\"\']+$', '', regex=True)
+    )
     test_df['image_path'] = test_df['name'].apply(lambda x: os.path.join(test_img_dir, x))
     
     test_dataset = BuildingSegmentationDataset(
