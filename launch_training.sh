@@ -123,17 +123,22 @@ check_dependencies() {
     fi
     
     # 检查CUDA（如果指定了GPU）
-    if [ "${GPU_COUNT:-1}" -gt 0 ]; then
+    local gpu_count="${GPU_COUNT:-1}"
+    if [ "${gpu_count}" -gt 0 ]; then
         if ! python -c "import torch; assert torch.cuda.is_available()" &> /dev/null; then
             print_warning "CUDA不可用，将使用CPU训练"
-            GPU_COUNT=0
+            export GPU_COUNT=0
         else
             local cuda_device_count=$(python -c "import torch; print(torch.cuda.device_count())")
-            if [ "${GPU_COUNT}" -gt "${cuda_device_count}" ]; then
-                print_warning "请求的GPU数量(${GPU_COUNT})超过可用数量(${cuda_device_count})"
-                GPU_COUNT=${cuda_device_count}
+            if [ "${gpu_count}" -gt "${cuda_device_count}" ]; then
+                print_warning "请求的GPU数量(${gpu_count})超过可用数量(${cuda_device_count})"
+                export GPU_COUNT=${cuda_device_count}
+            else
+                export GPU_COUNT=${gpu_count}
             fi
         fi
+    else
+        export GPU_COUNT=0
     fi
     
     print_success "依赖检查完成"
@@ -148,7 +153,8 @@ setup_environment() {
     export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
     
     # 设置CUDA环境
-    if [ "${GPU_COUNT:-1}" -gt 0 ]; then
+    local gpu_count="${GPU_COUNT:-1}"
+    if [ "${gpu_count}" -gt 0 ]; then
         export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
         print_info "使用GPU训练，设备: ${CUDA_VISIBLE_DEVICES}"
     else
@@ -310,12 +316,13 @@ run_training() {
     print_info "参数: ${cmd_args[*]}"
     
     # 选择执行方式
-    if [ "${GPU_COUNT:-1}" -gt 1 ]; then
+    local gpu_count="${GPU_COUNT:-1}"
+    if [ "${gpu_count}" -gt 1 ]; then
         # 多GPU分布式训练
-        print_info "使用${GPU_COUNT}个GPU进行分布式训练"
+        print_info "使用${gpu_count}个GPU进行分布式训练"
         exec torchrun \
             --standalone \
-            --nproc_per_node="${GPU_COUNT}" \
+            --nproc_per_node="${gpu_count}" \
             "${training_script}" \
             "${cmd_args[@]}"
     else
