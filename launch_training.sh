@@ -89,20 +89,37 @@ check_dependencies() {
         exit 1
     fi
     
-    # 检查必要的Python包
-    local required_packages=("torch" "torchvision" "numpy" "pandas" "opencv-python" "albumentations" "matplotlib" "seaborn")
-    local missing_packages=()
-    
-    for package in "${required_packages[@]}"; do
-        if ! python -c "import ${package//-/_}" &> /dev/null; then
-            missing_packages+=("${package}")
+    # 使用Python脚本检查依赖
+    if [ -f "check_dependencies.py" ]; then
+        local check_result=$(python check_dependencies.py 2>&1)
+        if [ $? -ne 0 ]; then
+            # 提取缺失的包
+            local missing_packages=$(echo "$check_result" | grep "MISSING_PACKAGES:" | cut -d' ' -f2-)
+            if [ -n "$missing_packages" ]; then
+                print_warning "缺少以下Python包: $missing_packages"
+                print_info "请运行: pip install $missing_packages"
+                exit 1
+            fi
         fi
-    done
-    
-    if [ ${#missing_packages[@]} -ne 0 ]; then
-        print_warning "缺少以下Python包: ${missing_packages[*]}"
-        print_info "请运行: pip install ${missing_packages[*]}"
-        exit 1
+    else
+        # 备用检查方法
+        local required_packages=("torch" "torchvision" "numpy" "pandas" "opencv-python" "albumentations" "matplotlib" "seaborn" "sklearn" "tqdm" "yaml" "tensorboard")
+        local import_names=("torch" "torchvision" "numpy" "pandas" "cv2" "albumentations" "matplotlib" "seaborn" "sklearn" "tqdm" "yaml" "tensorboard")
+        local missing_packages=()
+        
+        for i in "${!required_packages[@]}"; do
+            local package="${required_packages[$i]}"
+            local import_name="${import_names[$i]}"
+            if ! python -c "import ${import_name}" &> /dev/null; then
+                missing_packages+=("${package}")
+            fi
+        done
+        
+        if [ ${#missing_packages[@]} -ne 0 ]; then
+            print_warning "缺少以下Python包: ${missing_packages[*]}"
+            print_info "请运行: pip install ${missing_packages[*]}"
+            exit 1
+        fi
     fi
     
     # 检查CUDA（如果指定了GPU）
