@@ -88,6 +88,8 @@ output:
 - 保存内容：TensorBoard 日志、best_model.pth、training_history.json、推理超参搜索结果。
 - 随机性：固定 seed，划分可复现；输出目录包含最佳 checkpoint 与指标快照。
 
+![result_image](/img/Snipaste_2025-10-26_23-27-46.jpg)
+
 ---
 
 
