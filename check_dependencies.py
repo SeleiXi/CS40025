@@ -6,7 +6,11 @@
 
 import sys
 import importlib
+import warnings
 from typing import List, Tuple
+
+# 忽略PyTorch的pynvml警告
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.cuda")
 
 def check_package(package_name: str, import_name: str = None) -> Tuple[bool, str]:
     """检查包是否安装"""
@@ -26,7 +30,6 @@ def main():
     core_packages = [
         ('torch', 'torch'),
         ('torchvision', 'torchvision'),
-        ('torchaudio', 'torchaudio'),
         ('numpy', 'numpy'),
         ('pandas', 'pandas'),
         ('opencv-python', 'cv2'),

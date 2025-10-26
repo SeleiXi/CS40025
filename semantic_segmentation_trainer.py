@@ -252,7 +252,7 @@ class BuildingSegmentationDataset(Dataset):
                 # 几何变换
                 A.OneOf([
                     A.RandomResizedCrop(
-                        height=self.image_size, width=self.image_size,
+                        size=(self.image_size, self.image_size),
                         scale=(0.8, 1.0), ratio=(0.9, 1.1), p=0.6
                     ),
                     A.Affine(
